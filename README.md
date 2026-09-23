@@ -1,40 +1,86 @@
 # DERA
 
-The Diagnostically Enhanced Research Agent (DERA) combines LLM-guided code
-development with candidate-specific hyperparameter optimization. This
-repository contains the method's core implementation only.
+Official core implementation of the **Diagnostically Enhanced Research Agent
+(DERA)**, described in *Enhancing Automated Research Agents with Diagnostic
+Experiments*.
 
-## Core logic
+DERA combines iterative code development by a language-model agent with
+candidate-specific hyperparameter optimization. Diagnostic evaluations help
+distinguish limitations of a proposed program from limitations of its current
+configuration, and their evidence informs the next code change. Candidate
+selection uses development results; the selected program and configuration
+are frozen before a final test evaluation.
 
-DERA edits a candidate program, evaluates it on development data, and uses
-optional HPO trials to diagnose the candidate's behavior. The measured result
-and diagnostic feedback inform the next code edit. A controller maintains the
-best development-measured program and configuration. Test evaluation is
-performed only after selection is complete.
+This is a **method-only release**. It contains no benchmark tasks, datasets,
+checkpoints, baselines, test suite, or experimental result artifacts. The
+repository alone is therefore not a complete reproduction package for the
+paper's reported results.
 
-The implementation is organized as follows:
+## Implementation
 
-- `run.py`: command-line entry point;
-- `search_loop.py`: candidate generation, feedback, selection, and budgets;
-- `hpo_runner.py`: evaluation and configuration freezing;
-- `space_validator.py`: validation of proposed search spaces;
-- `llm_client.py`: OpenAI-compatible model calls and response logging;
-- `schema.py`: search-space and trial records;
-- `prompts/`: agent instructions and response contracts.
+| Path | Role |
+| --- | --- |
+| `run.py` | Command-line entry point and run configuration |
+| `search_loop.py` | Code-editing loop, feedback, selection, and budget accounting |
+| `hpo_runner.py` | Development evaluations, Optuna trials, and configuration freezing |
+| `space_validator.py` | Validation of proposed hyperparameter search spaces |
+| `llm_client.py` | OpenAI-compatible model client and call records |
+| `schema.py` | Search-space and evaluation records |
+| `prompts/` | Agent instructions and structured-response contracts |
 
-## Interface
+## Requirements
 
-The caller supplies a task directory containing `task.json`, a `base/`
-initial solution, and the evaluator named by `task.json`. The task definition
-specifies editable files, the objective, data subdirectory, and evaluator
-command. The evaluator writes a JSON result containing the objective metric.
-DERA reads development and test splits from the supplied data root; it does
-not package or modify task data.
+Use Python 3.10 or newer and install the core dependencies:
 
-Install the core dependencies with `pip install -r requirements.txt` and
-configure an API key with `DEEPSEEK_API_KEY` or `OPENAI_API_KEY`. Additional
-dependencies are determined by the caller's task evaluator. Run
-`python run.py --help` for the available inputs and budget controls.
+```bash
+python -m pip install -r requirements.txt
+```
 
-Each run writes candidate code, LLM responses, per-round development records,
-the selected result, and one final test result to its run directory.
+Set `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` in the environment. An alternative
+OpenAI-compatible endpoint can be supplied with `DEEPSEEK_BASE_URL`. The
+`openai` package is used as an API client; installing it does not prescribe
+which model to use. Dependencies required by a task evaluator are separate
+from this repository's core dependencies.
+
+## Task contract
+
+DERA operates on a caller-supplied task directory. The directory must contain
+a `task.json` definition, a `base/` initial program, and the evaluator named
+by `task.json`. The definition specifies:
+
+- `task_id` and `data_subdir`;
+- `editable_files`, relative to the candidate program;
+- `objective.metric` and `objective.direction` (`minimize` or `maximize`);
+- `evaluation_command`, with placeholders for the Python executable,
+  candidate directory, data directory, output path, and device.
+
+The evaluator must write JSON containing `metrics[objective.metric]`. DERA
+reads task data from `<data-root>/<data_subdir>/development` during search
+and from `<data-root>/<data_subdir>/test` only for final evaluation. It does
+not modify the evaluator or the data.
+
+## Running and outputs
+
+Run `python run.py --help` for the complete command-line interface. A generic
+invocation is:
+
+```text
+python run.py --task TASK_DIR --data-root DATA_ROOT --run-dir RUN_DIR \
+  --rounds N --hpo-budget B --max-hpo-trials-per-round M
+```
+
+Replace the uppercase placeholders with paths and budgets appropriate to the
+task. The optional `--evaluation-budget` caps the combined number of code
+evaluations and additional HPO trials. The initial-program evaluation and
+final test evaluation are tracked separately from that development budget.
+
+The run directory stores generated solutions, LLM call records, per-round
+development evaluations, `summary.json`, and `final_test/result.json`. A run
+can be resumed with the same settings after the previous process has stopped;
+completed rounds are recovered from their records.
+
+## Citation
+
+If you use DERA in research, please cite *Enhancing Automated Research Agents
+with Diagnostic Experiments*. Full bibliographic information will be added
+when the paper is available.
