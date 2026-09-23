@@ -11,11 +11,6 @@ configuration, and their evidence informs the next code change. Candidate
 selection uses development results; the selected program and configuration
 are frozen before a final test evaluation.
 
-This is a **method-only release**. It contains no benchmark tasks, datasets,
-checkpoints, baselines, test suite, or experimental result artifacts. The
-repository alone is therefore not a complete reproduction package for the
-paper's reported results.
-
 ## Implementation
 
 | Path | Role |
