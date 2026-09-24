@@ -1,0 +1,8 @@
+{
+  "task_id": "wikitext2_small_transformer_language_modeling",
+  "description": "Improve a word-level WikiText-2 language model. The initial program is a causal Transformer. Minimize token cross-entropy. Only train.py is editable, and the validation curve and best epoch must remain in the result JSON.",
+  "editable_files": ["train.py"],
+  "objective": {"metric": "cross_entropy", "direction": "minimize"},
+  "data_subdir": "wikitext2",
+  "evaluation_command": ["{python}", "evaluate.py", "--program-dir", "{program_dir}", "--data-dir", "{data_dir}", "--output", "{output}", "--device", "{device}"]
+}

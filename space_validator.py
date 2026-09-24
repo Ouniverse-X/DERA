@@ -6,10 +6,7 @@ import ast
 from pathlib import Path
 from typing import Any
 
-try:
-    from .schema import ParameterSpec, SearchSpace
-except ImportError:
-    from schema import ParameterSpec, SearchSpace
+from schema import ParameterSpec, SearchSpace
 
 
 ALLOWED_KINDS = {"float", "int", "categorical", "bool"}
@@ -31,10 +28,8 @@ def top_level_constants(source: str) -> dict[str, Any]:
     return values
 
 
-def validate_space(space: SearchSpace, files: dict[str, str], editable_files: list[str], max_dimensions: int | None = None) -> tuple[SearchSpace, list[str]]:
+def validate_space(space: SearchSpace, files: dict[str, str], editable_files: list[str]) -> tuple[SearchSpace, list[str]]:
     errors: list[str] = []
-    if max_dimensions is not None and len(space.parameters) > max_dimensions:
-        errors.append(f"too many parameters: {len(space.parameters)} > {max_dimensions}")
     seen: set[str] = set()
     accepted: list[ParameterSpec] = []
     for parameter in space.parameters:

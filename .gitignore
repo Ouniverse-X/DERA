@@ -1,29 +1,16 @@
 # Local credentials and environments
-local_config.py
 .env
 .env.*
 .venv/
 *.key
 *.pem
 
-# Generated experiments and downloaded data
+# Generated experiments
 /runs/
 /outputs/
-/data/
-/downloads/
-/baselines/
-/tasks/
-/tests/
-/agent_only.py
-/run_fixed_hpo.py
-/plot_hpo.py
-/prompts/agent_only_editor.md
-/prompts/agent_only_editor_system.md
 *.log
 *.pt
 *.pth
-*.npy
-*.npz
 *.parquet
 
 # Python and editor caches

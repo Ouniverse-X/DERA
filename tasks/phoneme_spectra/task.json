@@ -1,0 +1,8 @@
+{
+  "task_id": "phoneme_spectra_classification",
+  "description": "Improve a PyTorch classifier for 39-class, 11-channel PhonemeSpectra time series. The initial program is a three-block fully convolutional network. Only train.py is editable.",
+  "editable_files": ["train.py"],
+  "objective": {"metric": "accuracy", "direction": "maximize"},
+  "data_subdir": "phoneme_spectra",
+  "evaluation_command": ["{python}", "evaluate.py", "--program-dir", "{program_dir}", "--data-dir", "{data_dir}", "--output", "{output}", "--device", "{device}"]
+}

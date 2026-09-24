@@ -7,16 +7,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-try:
-    from .llm_client import DeepSeekClient
-    from .schema import SearchSpace
-    from .space_validator import validate_space
-    from .hpo_runner import PilotRunner
-except ImportError:
-    from llm_client import DeepSeekClient
-    from schema import SearchSpace
-    from space_validator import validate_space
-    from hpo_runner import PilotRunner
+from hpo_runner import DiagnosticRunner
+from llm_client import DeepSeekClient
+from schema import SearchSpace
+from space_validator import validate_space
 
 
 ROOT = Path(__file__).resolve().parent
@@ -45,10 +39,6 @@ def _normalize_edit(edit: dict[str, Any], editable: list[str]) -> dict[str, str]
         name: content for name, content in raw.items()
         if name in allowed and isinstance(content, str) and content
     }
-    for name in ("change_summary", "implemented_mechanism", "planned_vs_actual"):
-        value = raw.get(name)
-        if name not in edit and isinstance(value, str):
-            edit[name] = value
     return changed
 
 
@@ -59,272 +49,251 @@ def _objective_from_result(path: Path, metric: str) -> float | None:
     return float(payload["metrics"][metric])
 
 
-def _resolve_decision(direction: str, candidate_best: float | None, incumbent: dict[str, Any] | None, requested: str) -> str:
-    if candidate_best is not None and (incumbent is None or _better(direction, candidate_best, incumbent.get("score"))):
-        return "promote"
-    if requested == "keep_candidate" and candidate_best is not None:
-        return "archive"
-    if requested == "debug_candidate":
-        return "debug"
-    return "discard"
-
-
 class DERA:
-    def __init__(self, task_dir: Path, data_root: Path, run_dir: Path, client: DeepSeekClient, device: str = "auto", pilot_trials: int = 3, timeout: float = 1200.0, hpo_budget: int | None = None, max_hpo_trials_per_round: int | None = None, evaluation_budget: int | None = None) -> None:
+    def __init__(self, task_dir: Path, data_root: Path, run_dir: Path, client: DeepSeekClient, device: str = "auto", timeout: float = 1200.0, evaluation_budget: int = 50, per_iteration_trial_limit: int = 4) -> None:
         self.task_dir = task_dir.resolve()
         self.data_root = data_root.expanduser().resolve()
         self.run_dir = run_dir.resolve()
         self.client = client
         self.device = device
-        self.pilot_trials = pilot_trials
-        self.hpo_budget = hpo_budget
         self.evaluation_budget = evaluation_budget
-        self.max_hpo_trials_per_round = max_hpo_trials_per_round
+        self.per_iteration_trial_limit = per_iteration_trial_limit
         self.task = json.loads((self.task_dir / "task.json").read_text(encoding="utf-8"))
-        self.runner = PilotRunner(self.task_dir, self.data_root, device, timeout)
+        self.runner = DiagnosticRunner(self.task_dir, self.data_root, device, timeout)
 
-    def run(self, rounds: int, seed: int = 0) -> dict[str, Any]:
-        allowed_initial = {"llm_calls", "solutions", "rounds", "initial_development", "archive.json"}
+    def run(self, seed: int = 4) -> dict[str, Any]:
+        allowed_initial = {"llm_calls", "programs", "iterations", "initial_development"}
         existing = set(item.name for item in self.run_dir.iterdir()) if self.run_dir.exists() else set()
         if existing - allowed_initial:
             raise ValueError("run directory must be empty or new")
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        solutions = self.run_dir / "solutions"
-        solutions.mkdir(exist_ok=True)
-        initial = solutions / "s0000"
+        programs = self.run_dir / "programs"
+        programs.mkdir(exist_ok=True)
+        initial = programs / "p0000"
         if not initial.exists():
             shutil.copytree(self.task_dir / "base", initial)
         metric = self.task["objective"]["metric"]
         initial_result = self.run_dir / "initial_development" / "result.json"
         initial_score = _objective_from_result(initial_result, metric)
         if initial_score is None:
-            initial_eval = self.runner.evaluate_frozen(
+            initial_eval = self.runner.evaluate(
                 initial, SearchSpace(), {}, "development", self.run_dir / "initial_development"
             )
             initial_score = initial_eval.objective
         best_record: dict[str, Any] | None = None
         if initial_score is not None:
             best_record = {
-                "solution_id": "s0000", "score": initial_score, "params": {},
-                "round": 0, "evaluation_id": "initial_development",
+                "program_id": "p0000", "score": initial_score, "params": {},
+                "iteration": 0, "evaluation_id": "initial_development",
             }
         current = initial
         history: list[dict[str, Any]] = []
-        existing_rounds = sorted((self.run_dir / "rounds").glob("round-*")) if (self.run_dir / "rounds").exists() else []
-        if existing_rounds:
-            for folder in existing_rounds:
+        existing_iterations = sorted((self.run_dir / "iterations").glob("iteration-*")) if (self.run_dir / "iterations").exists() else []
+        if existing_iterations:
+            for folder in existing_iterations:
                 record_file = folder / "record.json"
                 if record_file.is_file():
                     record = json.loads(record_file.read_text(encoding="utf-8"))
                     history.append(record)
-            start_round = len(history) + 1
+            start_iteration = len(history) + 1
         else:
-            start_round = 1
+            start_iteration = 1
         direction = self.task["objective"]["direction"]
         for record in history:
-            score = record.get("candidate_best_objective", record.get("default_objective"))
+            score = record.get("program_best_objective", record.get("initial_objective"))
             if score is not None and (best_record is None or _better(direction, score, best_record["score"])):
                 best_record = {
-                    "solution_id": record["solution_id"], "score": score,
-                    "params": record.get("candidate_best_params", record.get("hpo", {}).get("best_params", {})),
-                    "round": record["round"],
-                    "evaluation_id": record.get("candidate_best_evaluation_id", f"round-{record['round']:04d}/default"),
+                    "program_id": record["program_id"], "score": score,
+                    "params": record.get("program_best_params", record.get("diagnostic_summary", {}).get("best_params", {})),
+                    "iteration": record["iteration"],
+                    "evaluation_id": record.get("program_best_evaluation_id", f"iteration-{record['iteration']:04d}/initial"),
                 }
         if best_record is not None:
-            current = solutions / best_record["solution_id"]
-        if history and history[-1].get("action", {}).get("controller_decision") in {"archive", "debug"}:
-            branch = solutions / history[-1]["solution_id"]
-            if branch.is_dir():
-                current = branch
-        archive_path = self.run_dir / "archive.json"
-        archive: list[dict[str, Any]] = json.loads(archive_path.read_text(encoding="utf-8")) if archive_path.is_file() else []
-        total_hpo_budget = self.hpo_budget if self.hpo_budget is not None else rounds * self.pilot_trials
-        hpo_trials_used = sum(int(record.get("hpo_trials_used", 0)) for record in history)
-        default_evaluations_used = 1 + len(history)
+            current = programs / best_record["program_id"]
+        diagnostic_trials_used = sum(int(record.get("diagnostic_trials_used", 0)) for record in history)
 
-        for round_id in range(start_round, rounds + 1):
-            charged_evaluations_used = len(history) + hpo_trials_used
-            if self.evaluation_budget is not None and charged_evaluations_used >= self.evaluation_budget:
+        iteration_id = start_iteration
+        while True:
+            evaluations_used = len(history) + diagnostic_trials_used
+            if evaluations_used >= self.evaluation_budget:
                 break
-            remaining_hpo_budget = total_hpo_budget - hpo_trials_used
-            per_round_hpo_limit = remaining_hpo_budget
-            if self.max_hpo_trials_per_round is not None:
-                per_round_hpo_limit = min(per_round_hpo_limit, self.max_hpo_trials_per_round)
-            if self.evaluation_budget is not None:
-                per_round_hpo_limit = min(per_round_hpo_limit, self.evaluation_budget - charged_evaluations_used - 1)
-            base_solution_id = current.name
+            current_trial_limit = min(
+                self.per_iteration_trial_limit,
+                self.evaluation_budget - evaluations_used - 1,
+            )
+            base_program_id = current.name
             before = _files(current, self.task["editable_files"])
             edit = self.client.json(
                 _prompt("code_editor_system.md"),
-                _prompt("code_editor.md").format(task=json.dumps(self.task, ensure_ascii=False, indent=2), round_id=round_id, current_files=json.dumps(before, ensure_ascii=False), incumbent=json.dumps(best_record, ensure_ascii=False), archive=json.dumps(archive, ensure_ascii=False), feedback=json.dumps(history[-1] if history else {}, ensure_ascii=False), history=json.dumps(history[-3:], ensure_ascii=False)),
-                f"round-{round_id:04d}-editor",
+                _prompt("code_editor.md").format(task=json.dumps(self.task, ensure_ascii=False, indent=2), iteration_id=iteration_id, current_files=json.dumps(before, ensure_ascii=False), best=json.dumps(best_record, ensure_ascii=False), analysis=json.dumps(history[-1].get("diagnostic_analysis", {}) if history else {}, ensure_ascii=False), history=json.dumps(history[-3:], ensure_ascii=False)),
+                f"iteration-{iteration_id:04d}-code",
             )
             files = _normalize_edit(edit, self.task["editable_files"])
             if not files:
-                retry_user = _prompt("code_editor.md").format(task=json.dumps(self.task, ensure_ascii=False, indent=2), round_id=round_id, current_files=json.dumps(before, ensure_ascii=False), incumbent=json.dumps(best_record, ensure_ascii=False), archive=json.dumps(archive, ensure_ascii=False), feedback=json.dumps(history[-1] if history else {}, ensure_ascii=False), history=json.dumps(history[-3:], ensure_ascii=False)) + "\nYour previous response had no valid files. Return complete contents for at least one editable file."
-                edit = self.client.json(_prompt("code_editor_system.md"), retry_user, f"round-{round_id:04d}-editor-retry")
+                retry_user = _prompt("code_editor.md").format(task=json.dumps(self.task, ensure_ascii=False, indent=2), iteration_id=iteration_id, current_files=json.dumps(before, ensure_ascii=False), best=json.dumps(best_record, ensure_ascii=False), analysis=json.dumps(history[-1].get("diagnostic_analysis", {}) if history else {}, ensure_ascii=False), history=json.dumps(history[-3:], ensure_ascii=False)) + "\nYour previous response had no valid files. Return complete contents for at least one editable file."
+                edit = self.client.json(_prompt("code_editor_system.md"), retry_user, f"iteration-{iteration_id:04d}-code-retry")
                 files = _normalize_edit(edit, self.task["editable_files"])
             if not files:
                 raise ValueError("code editor returned no editable files")
-            candidate = solutions / f"s{round_id:04d}"
-            shutil.copytree(current, candidate, dirs_exist_ok=True)
+            modified_program = programs / f"p{iteration_id:04d}"
+            shutil.copytree(current, modified_program, dirs_exist_ok=True)
             for relative, content in files.items():
-                target = candidate / relative
+                target = modified_program / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
 
-            round_dir = self.run_dir / "rounds" / f"round-{round_id:04d}"
-            round_dir.mkdir(parents=True, exist_ok=True)
-            default_eval = self.runner.evaluate_frozen(
-                candidate, SearchSpace(), {}, "development", round_dir / "default"
+            iteration_dir = self.run_dir / "iterations" / f"iteration-{iteration_id:04d}"
+            iteration_dir.mkdir(parents=True, exist_ok=True)
+            initial_eval = self.runner.evaluate(
+                modified_program, SearchSpace(), {}, "development", iteration_dir / "initial"
             )
-            default_evaluations_used += 1
-            default_objective = default_eval.objective
-            default_result_path = round_dir / "default" / "result.json"
-            default_payload = {}
-            if default_result_path.is_file():
-                default_payload = json.loads(default_result_path.read_text(encoding="utf-8"))
-            default_evidence = {
-                "status": default_eval.status,
-                "objective": default_objective,
-                "elapsed_seconds": default_eval.elapsed_seconds,
-                "error": default_eval.error,
-                "result": default_payload,
+            initial_objective = initial_eval.objective
+            initial_result_path = iteration_dir / "initial" / "result.json"
+            initial_payload = {}
+            if initial_result_path.is_file():
+                initial_payload = json.loads(initial_result_path.read_text(encoding="utf-8"))
+            initial_evidence = {
+                "status": initial_eval.status,
+                "objective": initial_objective,
+                "elapsed_seconds": initial_eval.elapsed_seconds,
+                "error": initial_eval.error,
+                "result": initial_payload,
             }
 
-            optimization_user = _prompt("space_designer.md").format(
+            diagnostic_user = _prompt("diagnostic_planner.md").format(
                 task=json.dumps(self.task, ensure_ascii=False, indent=2),
-                candidate_files=json.dumps(_files(candidate, self.task["editable_files"]), ensure_ascii=False),
-                change_summary=edit.get("change_summary", ""),
-                incumbent=json.dumps(best_record, ensure_ascii=False, indent=2),
-                archive=json.dumps(archive, ensure_ascii=False, indent=2),
+                modified_program_files=json.dumps(_files(modified_program, self.task["editable_files"]), ensure_ascii=False),
+                hypothesis=edit.get("hypothesis", ""),
+                best=json.dumps(best_record, ensure_ascii=False, indent=2),
                 history=json.dumps(history[-5:], ensure_ascii=False, indent=2),
-                default_evaluation=json.dumps(default_evidence, ensure_ascii=False, indent=2),
-                total_hpo_budget=total_hpo_budget,
-                hpo_trials_used=hpo_trials_used,
-                remaining_hpo_budget=max(0, remaining_hpo_budget),
-                per_round_hpo_limit=max(0, per_round_hpo_limit),
-                rounds_remaining=rounds - round_id + 1,
+                initial_evaluation=json.dumps(initial_evidence, ensure_ascii=False, indent=2),
+                evaluation_budget=self.evaluation_budget,
+                evaluations_used=evaluations_used + 1,
+                evaluations_remaining=max(0, self.evaluation_budget - evaluations_used - 1),
+                current_trial_limit=max(0, current_trial_limit),
             )
             space_value = self.client.json(
-                _prompt("space_designer_system.md"),
-                optimization_user,
-                f"round-{round_id:04d}-space",
+                _prompt("diagnostic_planner_system.md"),
+                diagnostic_user,
+                f"iteration-{iteration_id:04d}-diagnostic-plan",
             )
-            space, errors = validate_space(SearchSpace.from_dict(space_value), _files(candidate, self.task["editable_files"]), self.task["editable_files"])
-            use_tpe = bool(space_value.get("use_tpe", False))
-            tpe_trials = space_value.get("tpe_trials", 0) if use_tpe else 0
+            space, errors = validate_space(SearchSpace.from_dict(space_value), _files(modified_program, self.task["editable_files"]), self.task["editable_files"])
+            use_hpo = bool(space_value.get("use_hpo", False))
+            diagnostic_trials = space_value.get("diagnostic_trials", 0) if use_hpo else 0
             plan_errors = list(errors)
-            if not isinstance(tpe_trials, int) or isinstance(tpe_trials, bool) or tpe_trials < 0 or tpe_trials > max(0, per_round_hpo_limit):
-                plan_errors.append(f"tpe_trials must be an integer between 0 and {max(0, per_round_hpo_limit)}")
-            if use_tpe and (not space.parameters or tpe_trials < 1):
-                plan_errors.append("use_tpe requires a non-empty valid search space and at least one trial")
+            if not isinstance(diagnostic_trials, int) or isinstance(diagnostic_trials, bool) or diagnostic_trials < 0 or diagnostic_trials > max(0, current_trial_limit):
+                plan_errors.append(f"diagnostic_trials must be an integer between 0 and {max(0, current_trial_limit)}")
+            if use_hpo and (not space.parameters or diagnostic_trials < 1):
+                plan_errors.append("use_hpo requires a non-empty valid search space and at least one diagnostic trial")
             if plan_errors:
-                retry_user = optimization_user + "\nYour previous optimization plan was invalid: " + json.dumps(plan_errors, ensure_ascii=False) + ". Return a valid autonomous TPE decision within the remaining global budget."
-                space_value = self.client.json(_prompt("space_designer_system.md"), retry_user, f"round-{round_id:04d}-space-retry")
-                space, errors = validate_space(SearchSpace.from_dict(space_value), _files(candidate, self.task["editable_files"]), self.task["editable_files"])
-                use_tpe = bool(space_value.get("use_tpe", False))
-                tpe_trials = space_value.get("tpe_trials", 0) if use_tpe else 0
+                retry_user = diagnostic_user + "\nYour previous diagnostic plan was invalid: " + json.dumps(plan_errors, ensure_ascii=False) + ". Return a valid plan within the remaining evaluation budget."
+                space_value = self.client.json(_prompt("diagnostic_planner_system.md"), retry_user, f"iteration-{iteration_id:04d}-diagnostic-plan-retry")
+                space, errors = validate_space(SearchSpace.from_dict(space_value), _files(modified_program, self.task["editable_files"]), self.task["editable_files"])
+                use_hpo = bool(space_value.get("use_hpo", False))
+                diagnostic_trials = space_value.get("diagnostic_trials", 0) if use_hpo else 0
                 plan_errors = list(errors)
-                if not isinstance(tpe_trials, int) or isinstance(tpe_trials, bool) or tpe_trials < 0 or tpe_trials > max(0, per_round_hpo_limit):
-                    plan_errors.append(f"tpe_trials must be an integer between 0 and {max(0, per_round_hpo_limit)}")
-                if use_tpe and (not space.parameters or tpe_trials < 1):
-                    plan_errors.append("use_tpe requires a non-empty valid search space and at least one trial")
+                if not isinstance(diagnostic_trials, int) or isinstance(diagnostic_trials, bool) or diagnostic_trials < 0 or diagnostic_trials > max(0, current_trial_limit):
+                    plan_errors.append(f"diagnostic_trials must be an integer between 0 and {max(0, current_trial_limit)}")
+                if use_hpo and (not space.parameters or diagnostic_trials < 1):
+                    plan_errors.append("use_hpo requires a non-empty valid search space and at least one diagnostic trial")
             if plan_errors:
-                raise ValueError(f"Optimization Agent returned an invalid plan: {plan_errors}")
-            (round_dir / "hpo_space.json").write_text(json.dumps({"use_tpe": use_tpe, "tpe_trials": tpe_trials, "per_round_hpo_limit": per_round_hpo_limit, "total_hpo_budget": total_hpo_budget, "tpe_settings": space_value.get("tpe_settings", {}), "space": space.to_dict(), "strategy": space_value.get("strategy", ""), "errors": errors}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            if use_tpe:
-                hpo = self.runner.run(
-                    candidate, space, tpe_trials, seed + round_id,
-                    round_dir / "hpo", sampler_name="tpe_dynamic", anchor=default_eval,
+                raise ValueError(f"Diagnostic Agent returned an invalid plan: {plan_errors}")
+            (iteration_dir / "diagnostic_plan.json").write_text(json.dumps({"use_hpo": use_hpo, "diagnostic_trials": diagnostic_trials, "current_trial_limit": current_trial_limit, "tpe_settings": space_value.get("tpe_settings", {}), "space": space.to_dict(), "strategy": space_value.get("strategy", ""), "errors": errors}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if use_hpo:
+                diagnostic_result = self.runner.run(
+                    modified_program, space, diagnostic_trials, seed + iteration_id,
+                    iteration_dir / "diagnostic_trials", anchor=initial_eval,
                     tpe_settings=space_value.get("tpe_settings", {}),
                 )
-                summary = hpo.to_dict()
+                summary = diagnostic_result.to_dict()
             else:
-                anchor_trial = default_eval.to_dict()
+                anchor_trial = initial_eval.to_dict()
                 anchor_trial["trial_id"] = 0
                 summary = {
-                    "direction": direction, "default_objective": default_objective,
-                    "best_objective": default_objective, "best_params": {},
-                    "trials": [anchor_trial], "best_so_far": [default_objective] if default_objective is not None else [],
-                    "failure_rate": 0.0 if default_objective is not None else 1.0,
+                    "direction": direction, "initial_objective": initial_objective,
+                    "best_objective": initial_objective, "best_params": {},
+                    "trials": [anchor_trial], "best_so_far": [initial_objective] if initial_objective is not None else [],
+                    "failure_rate": 0.0 if initial_objective is not None else 1.0,
                     "space": SearchSpace().to_dict(),
                 }
-            summary["optimization_strategy"] = space_value.get("strategy", "")
-            summary["optimization_reason"] = space_value.get("rationale", "")
-            (round_dir / "hpo_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            hpo_trials_used += tpe_trials
-            candidate_best = summary.get("best_objective")
-            candidate_params = summary.get("best_params", {})
+            summary["diagnostic_strategy"] = space_value.get("strategy", "")
+            summary["diagnostic_rationale"] = space_value.get("rationale", "")
+            (iteration_dir / "diagnostic_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            diagnostic_trials_used += diagnostic_trials
+            program_best = summary.get("best_objective")
+            program_params = summary.get("best_params", {})
             best_trial = next(
-                (trial for trial in summary.get("trials", []) if trial.get("status") == "success" and trial.get("objective") == candidate_best),
+                (trial for trial in summary.get("trials", []) if trial.get("status") == "success" and trial.get("objective") == program_best),
                 None,
             )
             best_trial_id = best_trial.get("trial_id", 0) if best_trial else 0
-            if candidate_best is not None and candidate_params:
-                self.runner.materialize(candidate, space, candidate_params)
-            evaluation_id = f"round-{round_id:04d}/default" if best_trial_id == 0 else f"round-{round_id:04d}/hpo/trial-{best_trial_id:04d}"
-            frozen_state = {
-                "solution_id": candidate.name, "config": candidate_params,
-                "objective": candidate_best,
+            if program_best is not None and program_params:
+                self.runner.materialize(modified_program, space, program_params)
+            evaluation_id = f"iteration-{iteration_id:04d}/initial" if best_trial_id == 0 else f"iteration-{iteration_id:04d}/diagnostic-trials/trial-{best_trial_id:04d}"
+            program_state = {
+                "program_id": modified_program.name, "config": program_params,
+                "objective": program_best,
                 "evaluation_id": evaluation_id,
             }
-            (candidate / "frozen_config.json").write_text(json.dumps(frozen_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            action = self.client.json(
-                _prompt("feedback_controller_system.md"),
-                _prompt("feedback_controller.md").format(
+            (modified_program / "selected_config.json").write_text(json.dumps(program_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            analysis = self.client.json(
+                _prompt("diagnostic_analyzer_system.md"),
+                _prompt("diagnostic_analyzer.md").format(
                     task=json.dumps(self.task, ensure_ascii=False, indent=2),
-                    change_summary=edit.get("change_summary", ""),
-                    incumbent=json.dumps(best_record, ensure_ascii=False, indent=2),
-                    default_objective=default_objective,
-                    candidate_best=json.dumps(frozen_state, ensure_ascii=False, indent=2),
-                    hpo_summary=json.dumps(summary, ensure_ascii=False, indent=2),
+                    hypothesis=edit.get("hypothesis", ""),
+                    best=json.dumps(best_record, ensure_ascii=False, indent=2),
+                    initial_objective=initial_objective,
+                    program_best=json.dumps(program_state, ensure_ascii=False, indent=2),
+                    diagnostic_summary=json.dumps(summary, ensure_ascii=False, indent=2),
                 ),
-                f"round-{round_id:04d}-feedback",
+                f"iteration-{iteration_id:04d}-diagnostic-analysis",
             )
-            requested = str(action.get("decision", "discard_candidate"))
-            controller_decision = _resolve_decision(direction, candidate_best, best_record, requested)
-            if controller_decision == "promote":
+            improved = program_best is not None and (
+                best_record is None or _better(direction, program_best, best_record.get("score"))
+            )
+            if improved:
                 best_record = {
-                    "solution_id": candidate.name, "score": candidate_best,
-                    "params": candidate_params, "round": round_id,
-                    "evaluation_id": frozen_state["evaluation_id"],
+                    "program_id": modified_program.name, "score": program_best,
+                    "params": program_params, "iteration": iteration_id,
+                    "evaluation_id": program_state["evaluation_id"],
                 }
-                current = candidate
-            elif controller_decision == "archive":
-                archive.append(frozen_state)
-                archive.sort(key=lambda item: item["objective"], reverse=direction == "maximize")
-                archive = archive[:5]
-                current = candidate
-            elif controller_decision == "debug":
-                current = candidate
+                current = modified_program
             else:
-                controller_decision = "discard"
-                current = solutions / best_record["solution_id"] if best_record is not None else initial
-            action["controller_decision"] = controller_decision
-            archive_path.write_text(json.dumps(archive, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            (round_dir / "action.json").write_text(json.dumps(action, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                current = programs / best_record["program_id"] if best_record is not None else initial
+            (iteration_dir / "diagnostic_analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             record = {
-                "round": round_id, "solution_id": candidate.name,
-                "base_solution_id": base_solution_id,
-                "change_summary": edit.get("change_summary", ""), "action": action,
-                "default_objective": default_objective, "default_status": default_eval.status,
-                "candidate_best_objective": candidate_best,
-                "candidate_best_params": candidate_params,
-                "candidate_best_evaluation_id": frozen_state["evaluation_id"],
-                "hpo_trials_used": tpe_trials,
-                "per_round_hpo_limit": per_round_hpo_limit,
-                "hpo_budget_remaining": total_hpo_budget - hpo_trials_used,
-                "hpo": summary,
+                "iteration": iteration_id, "program_id": modified_program.name,
+                "base_program_id": base_program_id,
+                "hypothesis": edit.get("hypothesis", ""),
+                "initial_objective": initial_objective, "initial_status": initial_eval.status,
+                "program_best_objective": program_best,
+                "program_best_params": program_params,
+                "program_best_evaluation_id": program_state["evaluation_id"],
+                "improved_best": improved,
+                "diagnostic_trials_used": diagnostic_trials,
+                "per_iteration_trial_limit": current_trial_limit,
+                "diagnostic_summary": summary,
+                "diagnostic_analysis": analysis,
             }
-            (round_dir / "record.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            (iteration_dir / "record.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             history.append(record)
+            iteration_id += 1
 
-        result = {"task": self.task["task_id"], "rounds": rounds, "research_rounds_completed": len(history), "evaluation_budget": self.evaluation_budget, "charged_development_evaluations": len(history) + hpo_trials_used, "hpo_budget": total_hpo_budget, "max_hpo_trials_per_round": self.max_hpo_trials_per_round, "hpo_trials_used": hpo_trials_used, "default_evaluations_used": default_evaluations_used, "total_development_evaluations": default_evaluations_used + hpo_trials_used, "best": best_record, "archive": archive, "history": history}
+        result = {
+            "task": self.task["task_id"],
+            "iterations_completed": len(history),
+            "evaluation_budget": self.evaluation_budget,
+            "evaluations_used": len(history) + diagnostic_trials_used,
+            "per_iteration_trial_limit": self.per_iteration_trial_limit,
+            "code_evaluations": len(history),
+            "diagnostic_trials": diagnostic_trials_used,
+            "best": best_record,
+            "history": history,
+        }
         if best_record is not None:
-            selected = solutions / best_record["solution_id"]
-            frozen = self.runner.evaluate_frozen(selected, SearchSpace(), {}, "test", self.run_dir / "final_test")
-            result["final_test"] = frozen.to_dict()
-            (self.run_dir / "final_test.json").write_text(json.dumps(frozen.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            selected = programs / best_record["program_id"]
+            final_evaluation = self.runner.evaluate(selected, SearchSpace(), {}, "test", self.run_dir / "final_test")
+            result["final_test"] = final_evaluation.to_dict()
+            (self.run_dir / "final_test.json").write_text(json.dumps(final_evaluation.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (self.run_dir / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return result

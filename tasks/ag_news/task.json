@@ -1,0 +1,8 @@
+{
+  "task_id": "ag_news_text_classification",
+  "description": "Improve a PyTorch AG News four-class text classifier. The initial program uses EmbeddingBag and a linear classifier. Only train.py is editable.",
+  "editable_files": ["train.py"],
+  "objective": {"metric": "accuracy", "direction": "maximize"},
+  "data_subdir": "ag_news",
+  "evaluation_command": ["{python}", "evaluate.py", "--program-dir", "{program_dir}", "--data-dir", "{data_dir}", "--output", "{output}", "--device", "{device}"]
+}

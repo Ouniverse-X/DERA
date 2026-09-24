@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 
 ParamKind = Literal["float", "int", "categorical", "bool"]
-Action = Literal["keep_candidate", "discard_candidate", "debug_candidate"]
 
 
 @dataclass(frozen=True)
@@ -72,9 +71,9 @@ class TrialRecord:
 
 
 @dataclass
-class HPOSummary:
+class DiagnosticSummary:
     direction: Literal["minimize", "maximize"]
-    default_objective: float | None
+    initial_objective: float | None
     best_objective: float | None
     best_params: dict[str, Any]
     trials: list[TrialRecord]
@@ -84,7 +83,7 @@ class HPOSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "direction": self.direction, "default_objective": self.default_objective,
+            "direction": self.direction, "initial_objective": self.initial_objective,
             "best_objective": self.best_objective, "best_params": self.best_params,
             "trials": [x.to_dict() for x in self.trials], "best_so_far": self.best_so_far,
             "failure_rate": self.failure_rate, "space": self.space.to_dict(),

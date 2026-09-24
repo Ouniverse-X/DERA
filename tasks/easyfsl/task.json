@@ -1,0 +1,8 @@
+{
+  "task_id": "easyfsl_prototypical_networks",
+  "description": "Improve Prototypical Networks on fixed Mini-ImageNet 5-way 1-shot episodes using frozen 640-dimensional features. Only the two declared method files are editable.",
+  "editable_files": ["easyfsl/methods/few_shot_classifier.py", "easyfsl/methods/prototypical_networks.py"],
+  "objective": {"metric": "accuracy", "direction": "maximize"},
+  "data_subdir": "easyfsl",
+  "evaluation_command": ["{python}", "evaluate.py", "--program-dir", "{program_dir}", "--data-dir", "{data_dir}", "--output", "{output}", "--device", "{device}"]
+}

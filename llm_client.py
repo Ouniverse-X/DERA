@@ -9,15 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from . import local_config
-except (ImportError, ModuleNotFoundError):
-    try:
-        import local_config  # type: ignore
-    except ModuleNotFoundError:
-        local_config = None  # type: ignore
-
-
 def extract_json(text: str) -> dict[str, Any]:
     text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "").strip()
     try:
@@ -41,16 +32,13 @@ class DeepSeekClient:
             from openai import OpenAI
         except ImportError as exc:
             raise RuntimeError("install openai>=2.44.0") from exc
-        configured_key = getattr(local_config, "DEEPSEEK_API_KEY", "") if local_config else ""
-        configured_url = getattr(local_config, "DEEPSEEK_BASE_URL", "") if local_config else ""
-        configured_model = getattr(local_config, "DEEPSEEK_MODEL", "") if local_config else ""
-        key = os.environ.get("DEEPSEEK_API_KEY") or configured_key or os.environ.get("OPENAI_API_KEY")
+        key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
         if not key: raise RuntimeError("DEEPSEEK_API_KEY or OPENAI_API_KEY is required")
         kwargs: dict[str, Any] = {"api_key": key}
-        url = base_url or os.environ.get("DEEPSEEK_BASE_URL") or configured_url or os.environ.get("OPENAI_BASE_URL") or "https://api.deepseek.com"
+        url = base_url or os.environ.get("DEEPSEEK_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.deepseek.com"
         if url: kwargs["base_url"] = url
         self.client = OpenAI(**kwargs)
-        self.model = model or os.environ.get("DEEPSEEK_MODEL") or configured_model or "deepseek-v4-flash"
+        self.model = model or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-flash"
         self.log_dir = log_dir
         if log_dir: log_dir.mkdir(parents=True, exist_ok=True)
 

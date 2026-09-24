@@ -1,81 +1,37 @@
 # DERA
 
-Official core implementation of the **Diagnostically Enhanced Research Agent
-(DERA)**, described in *Enhancing Automated Research Agents with Diagnostic
-Experiments*.
+This repository contains the implementation of the **Diagnostically Enhanced Research Agent (DERA)**.
 
-DERA combines iterative code development by a language-model agent with
-candidate-specific hyperparameter optimization. Diagnostic evaluations help
-distinguish limitations of a proposed program from limitations of its current
-configuration, and their evidence informs the next code change. Candidate
-selection uses development results; the selected program and configuration
-are frozen before a final test evaluation.
+DERA combines iterative code development with diagnostic experiments. At each iteration, the Code Agent modifies and evaluates the current best program. The Diagnostic Agent then decides whether to conduct HPO, designs and analyzes diagnostic trials, and provides its analysis to the next Code Agent. We use Optuna TPE to execute the diagnostic trials.
 
-## Implementation
+The repository includes the four tasks used in our experiments:
 
-| Path | Role |
-| --- | --- |
-| `run.py` | Command-line entry point and run configuration |
-| `search_loop.py` | Code-editing loop, feedback, selection, and budget accounting |
-| `hpo_runner.py` | Development evaluations, Optuna trials, and configuration freezing |
-| `space_validator.py` | Validation of proposed hyperparameter search spaces |
-| `llm_client.py` | OpenAI-compatible model client and call records |
-| `schema.py` | Search-space and evaluation records |
-| `prompts/` | Agent instructions and structured-response contracts |
+- WikiText-2 language modeling
+- AG News text classification
+- EasyFSL few-shot image classification
+- PhonemeSpectra time-series classification
 
-## Requirements
+Each task includes its initial program and evaluator. Due to repository space constraints, `data/` contains compact development and test subsets for running the code. See [`data/README.md`](data/README.md) for the complete datasets and their original sources.
 
-Use Python 3.10 or newer and install the core dependencies:
+## Run
+
+Install the dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Set `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` in the environment. An alternative
-OpenAI-compatible endpoint can be supplied with `DEEPSEEK_BASE_URL`. The
-`openai` package is used as an API client; installing it does not prescribe
-which model to use. Dependencies required by a task evaluator are separate
-from this repository's core dependencies.
+Set `DEEPSEEK_API_KEY`, then run:
 
-## Task contract
-
-DERA operates on a caller-supplied task directory. The directory must contain
-a `task.json` definition, a `base/` initial program, and the evaluator named
-by `task.json`. The definition specifies:
-
-- `task_id` and `data_subdir`;
-- `editable_files`, relative to the candidate program;
-- `objective.metric` and `objective.direction` (`minimize` or `maximize`);
-- `evaluation_command`, with placeholders for the Python executable,
-  candidate directory, data directory, output path, and device.
-
-The evaluator must write JSON containing `metrics[objective.metric]`. DERA
-reads task data from `<data-root>/<data_subdir>/development` during search
-and from `<data-root>/<data_subdir>/test` only for final evaluation. It does
-not modify the evaluator or the data.
-
-## Running and outputs
-
-Run `python run.py --help` for the complete command-line interface. A generic
-invocation is:
-
-```text
-python run.py --task TASK_DIR --data-root DATA_ROOT --run-dir RUN_DIR \
-  --rounds N --hpo-budget B --max-hpo-trials-per-round M
+```bash
+python run.py \
+  --task tasks/TASK \
+  --data-root data \
+  --run-dir runs/TASK-seed4 \
+  --evaluation-budget 50 \
+  --per-iteration-trial-limit 4 \
+  --seed 4 \
+  --device cuda:0
 ```
 
-Replace the uppercase placeholders with paths and budgets appropriate to the
-task. The optional `--evaluation-budget` caps the combined number of code
-evaluations and additional HPO trials. The initial-program evaluation and
-final test evaluation are tracked separately from that development budget.
-
-The run directory stores generated solutions, LLM call records, per-round
-development evaluations, `summary.json`, and `final_test/result.json`. A run
-can be resumed with the same settings after the previous process has stopped;
-completed rounds are recovered from their records.
-
-## Citation
-
-If you use DERA in research, please cite *Enhancing Automated Research Agents
-with Diagnostic Experiments*. Full bibliographic information will be added
-when the paper is available.
+Each Code Agent evaluation and diagnostic trial counts toward the shared evaluation budget. The best program selected on the development set is evaluated once on the test set.
